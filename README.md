@@ -1,1 +1,11 @@
 # neoheberg.fr-Run
+
+NEO_EMAIL
+
+NEO_PWD
+
+VPS_PANEL_URL
+
+PROXY_URL
+
+TG_BOT_TOKEN(可选)、TG_CHAT_ID(可选)。
