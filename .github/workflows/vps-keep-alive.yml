@@ -1,0 +1,111 @@
+name: NeoHeberg VPS Keep Alive (Smart Proxy)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */4 * * *" # 每4小时运行一次
+
+jobs:
+  check-and-start:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v3
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: 解析代理节点并生成配置 (自动识别 VLESS/HY2/Trojan)
+        env:
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: |
+          python -c '
+          import os, json, urllib.parse
+          url = os.environ.get("PROXY_URL", "").strip()
+          if not url: exit("❌ 未找到 PROXY_URL 变量")
+          
+          parsed = urllib.parse.urlparse(url)
+          scheme = parsed.scheme.lower()
+          qs = urllib.parse.parse_qs(parsed.query)
+          
+          outbound = {"type": scheme, "tag": "proxy"}
+          
+          # 解析 VLESS
+          if scheme == "vless":
+              outbound["uuid"] = urllib.parse.unquote(parsed.username)
+              outbound["server"] = parsed.hostname
+              outbound["server_port"] = parsed.port or 443
+              
+              if qs.get("security", [""])[0] in ["tls", "reality"]:
+                  outbound["tls"] = {"enabled": True}
+                  if qs.get("sni"): outbound["tls"]["server_name"] = qs.get("sni")[0]
+                  if qs.get("insecure", ["0"])[0] == "1": outbound["tls"]["insecure"] = True
+                  
+                  if qs.get("security")[0] == "reality":
+                      outbound["tls"]["reality"] = {"enabled": True, "public_key": qs.get("pbk", [""])[0], "short_id": qs.get("sid", [""])[0]}
+              
+              net_type = qs.get("type", ["tcp"])[0]
+              if net_type == "ws":
+                  outbound["transport"] = {"type": "ws", "path": qs.get("path", ["/"])[0]}
+                  if qs.get("host"): outbound["transport"]["headers"] = {"Host": qs.get("host")[0]}
+              elif net_type == "grpc":
+                  outbound["transport"] = {"type": "grpc", "service_name": qs.get("serviceName", [""])[0]}
+                  
+          # 解析 Hysteria2
+          elif scheme in ["hy2", "hysteria2"]:
+              outbound["type"] = "hysteria2"
+              outbound["password"] = urllib.parse.unquote(parsed.username)
+              outbound["server"] = parsed.hostname
+              outbound["server_port"] = parsed.port or 443
+              outbound["tls"] = {"enabled": True}
+              if qs.get("sni"): outbound["tls"]["server_name"] = qs.get("sni")[0]
+              if qs.get("insecure", ["0"])[0] == "1": outbound["tls"]["insecure"] = True
+              
+          # 解析 Trojan
+          elif scheme == "trojan":
+              outbound["password"] = urllib.parse.unquote(parsed.username)
+              outbound["server"] = parsed.hostname
+              outbound["server_port"] = parsed.port or 443
+              outbound["tls"] = {"enabled": True}
+              if qs.get("sni"): outbound["tls"]["server_name"] = qs.get("sni")[0]
+              if qs.get("insecure", ["0"])[0] == "1": outbound["tls"]["insecure"] = True
+          else:
+              exit(f"❌ 不支持的节点格式: {scheme}")
+
+          # 构建 sing-box 基础框架
+          config = {
+              "inbounds": [{"type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 1080}],
+              "outbounds": [outbound, {"type": "direct", "tag": "direct"}]
+          }
+          
+          with open("config.json", "w") as f:
+              json.dump(config, f, indent=2)
+          print(f"✅ 成功识别节点，已将 {scheme.upper()} 转换为本地 SOCKS5 (1080) 端口！")
+          '
+
+      - name: 安装 Python 自动化依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright requests
+          playwright install chromium
+          playwright install-deps
+
+      - name: 启动 sing-box 代理客户端
+        run: |
+          wget https://github.com/SagerNet/sing-box/releases/download/v1.8.11/sing-box-1.8.11-linux-amd64.tar.gz
+          tar -xzf sing-box-1.8.11-linux-amd64.tar.gz
+          nohup ./sing-box-1.8.11-linux-amd64/sing-box run -c config.json > singbox.log 2>&1 &
+          sleep 5
+          echo "测试代理连通性 (若显示节点IP则代理成功):"
+          curl -x socks5h://127.0.0.1:1080 https://api.ipify.org || echo "代理连接失败，请检查节点!"
+
+      - name: 运行开机检查脚本
+        env:
+          NEO_EMAIL: ${{ secrets.NEO_EMAIL }}
+          NEO_PWD: ${{ secrets.NEO_PWD }}
+          VPS_PANEL_URL: ${{ secrets.VPS_PANEL_URL }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python main.py
