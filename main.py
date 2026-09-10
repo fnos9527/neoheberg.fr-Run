@@ -37,7 +37,6 @@ def run():
             time.sleep(5)
             page.screenshot(path="1_刚打开页面时的状态.png")
             
-            # 使用更宽泛的选择器，防止 type="text" 导致找不到
             print("正在输入账号密码...")
             email_input = page.locator('input[type="email"], input[type="text"]').first
             email_input.wait_for(state="visible", timeout=30000)
@@ -46,32 +45,43 @@ def run():
             page.locator('input[type="password"]').fill(PWD)
             print("已输入账号密码。")
             
+            # --- 优化后的验证码处理逻辑 ---
             print("等待验证码加载...")
             time.sleep(3)
             
             try:
-                cf_frame = page.frame_locator('iframe[src*="cloudflare"]')
-                cf_frame.locator('.cb-tc').click(timeout=5000)
-                print("已点击人机验证复选框，等待验证通过...")
-                time.sleep(8) # 多等一会，让勾选动画转完
-            except Exception:
-                print("未检测到标准验证码 iframe，可能被自动跳过，继续执行。")
+                # 寻找包含 cloudflare 的 iframe
+                cf_iframe = page.locator('iframe[src*="cloudflare"]').first
+                cf_iframe.wait_for(state="visible", timeout=10000)
+                
+                # 精确点击 iframe 的偏左侧 (即复选框所在的位置)
+                # Cloudflare Turnstile 验证码组件通常是 300x65 大小，x=30, y=30 正好是打勾的位置
+                cf_iframe.click(position={"x": 30, "y": 30})
+                print("已点击人机验证区域，等待验证通过转圈完成 (10秒)...")
+                time.sleep(10) # 必须等待，转圈打勾需要时间
+            except Exception as e:
+                print(f"验证码点击出现异常: {e}，尝试继续...")
 
-            # 【要求1】点击登录前，截取验证是否打勾的图
+            # 截取点击登录前的状态图，确认是否成功打勾
             page.screenshot(path="2_点击登录前(确认是否打勾).png")
 
             page.get_by_role("button", name="Se connecter").click()
             print("已点击登录按钮，等待跳转...")
             
-            # 等待跳转完成
-            page.wait_for_url('**/dashboard**', timeout=20000)
-            print("登录成功！")
+            # 优化跳转判断：只要 URL 里不再包含 "login"，就说明跳走登录成功了
+            try:
+                page.wait_for_url(lambda url: "login" not in url, timeout=20000)
+                print("页面已成功跳转！")
+            except Exception:
+                page.screenshot(path="error_登录失败未跳转.png")
+                raise Exception("点击登录后页面未能跳转，可能是验证码未打上勾或账号密码错误！")
 
-            print(f"正在跳转至容器面板: {VPS_URL}")
+            # -----------------------------
+
+            print(f"正在前往容器面板: {VPS_URL}")
             page.goto(VPS_URL, timeout=30000)
             time.sleep(6) # 等待面板数据加载
             
-            # 【要求2】截取跳转到第二页面的图
             page.screenshot(path="3_进入VPS面板后.png")
 
             if page.locator('text="Arrêté"').is_visible():
@@ -80,11 +90,10 @@ def run():
                 start_btn = page.locator('button:has-text("Démarrer")')
                 if start_btn.is_visible():
                     start_btn.click()
-                    print("已点击 Démarrer，等待 5-8 秒确认状态...")
+                    print("已点击 Démarrer，等待 8 秒确认状态...")
                     
                     time.sleep(8) # 等待开机指令生效
                     
-                    # 【要求3】截取点击开机后的最终状态图
                     page.screenshot(path="4_开机指令执行后的最终状态.png")
                     
                     if not page.locator('text="Arrêté"').is_visible():
@@ -97,6 +106,7 @@ def run():
                         send_telegram_msg(msg)
                 else:
                     print("未找到 Démarrer 按钮。")
+                    page.screenshot(path="error_未找到开机按钮.png")
                     
             else:
                 msg = "ℹ️ 容器状态正常(未处于 Arrêté)，不做任何处理，工作流结束。"
@@ -107,14 +117,13 @@ def run():
         except Exception as e:
             error_msg = f"❌ 执行过程中出现异常: {str(e)}"
             print(error_msg)
-            # 【发生错误时截图】记录死亡瞬间
             try:
                 page.screenshot(path="error_发生错误时的截图.png", full_page=True)
                 print("已保存错误发生瞬间的截图！")
             except:
                 pass
             send_telegram_msg(error_msg)
-            raise e # 抛出异常让 Actions 显示红叉
+            raise e
         
         finally:
             browser.close()
