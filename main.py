@@ -18,50 +18,52 @@ def send_telegram_msg(message):
         except Exception as e:
             print(f"TG通知发送失败: {e}")
 
-def solve_hcaptcha(page):
+def solve_cap_widget(page):
     """
-    尝试勾选 hCaptcha 复选框，并返回是否成功勾选。
-    优先用官方固定的 iframe title 精确定位；失败则回退到坐标点击兜底。
+    处理开源验证码组件 Cap (tiagozip/cap)。
+    它不是 iframe，而是一个 <cap-widget> 自定义元素 (Shadow DOM)，
+    本质是"工作量证明"验证码——真实浏览器执行 JS 即可自动算出结果，
+    不需要任何打码平台。这里用它官方的 solve/error 事件来确认结果，
+    而不是靠 sleep 猜时间。
     """
-    # 方案一：用 hCaptcha 固定的 iframe title 精确定位（最可靠）
     try:
-        checkbox_frame = page.frame_locator(
-            'iframe[title="Widget containing checkbox for hCaptcha security challenge"]'
-        )
-        checkbox = checkbox_frame.locator('#checkbox')
-        checkbox.wait_for(state="visible", timeout=15000)
-        checkbox.click()
-        print("👆 已通过精确定位点击 hCaptcha 复选框，等待验证 (12秒)...")
-        time.sleep(12)
+        widget = page.locator('cap-widget')
+        widget.wait_for(state="visible", timeout=20000)
+        print("🎯 已定位到 cap-widget 验证组件")
 
-        aria_checked = checkbox.get_attribute("aria-checked")
-        if aria_checked == "true":
-            print("✅ 验证码已成功勾选！")
-            return True
-        else:
-            print(f"⚠️ 复选框 aria-checked = {aria_checked}，可能触发了图片验证挑战，而非简单勾选。")
-            return False
-    except Exception as e:
-        print(f"⚠️ 精确定位 hCaptcha 复选框失败: {e}")
+        # 提前挂上事件监听，记录 solve / error 事件的结果
+        page.evaluate("""
+            () => {
+                window.__capToken = null;
+                window.__capError = null;
+                const w = document.querySelector('cap-widget');
+                if (w) {
+                    w.addEventListener('solve', (e) => { window.__capToken = e.detail.token; });
+                    w.addEventListener('error', (e) => { window.__capError = e.detail.message; });
+                }
+            }
+        """)
 
-    # 方案二：兜底，遍历所有 iframe，按尺寸猜测并坐标点击
-    print("尝试使用备用的坐标点击方案...")
-    try:
-        page.wait_for_selector('iframe', timeout=10000)
-        iframes = page.locator('iframe').all()
-        for iframe in iframes:
-            box = iframe.bounding_box()
-            if box and box['width'] > 150 and box['height'] > 40:
-                print(f"🎯 兜底方案锁定验证码组件，物理尺寸: {box['width']}x{box['height']}")
-                click_y = box['height'] / 2
-                iframe.click(position={"x": 30, "y": click_y})
-                print("👆 已点击人机验证左侧区域，等待验证通过 (等待 12 秒)...")
-                time.sleep(12)
-                return True
-        print("⚠️ 兜底方案也未能扫描到符合尺寸的验证码框。")
-        return False
+        # 用真实点击触发验证 (Playwright 会自动穿透 Shadow DOM 定位到可点击区域)
+        widget.click(timeout=10000)
+        print("👆 已点击 Cap 验证组件，等待其自动完成工作量证明计算...")
+
+        # 轮询等待 token 生成，最长等待 25 秒
+        token = None
+        for _ in range(25):
+            token = page.evaluate("window.__capToken")
+            error = page.evaluate("window.__capError")
+            if token:
+                print("✅ Cap 验证已通过，已成功拿到 token！")
+                break
+            if error:
+                print(f"⚠️ Cap 验证组件返回错误: {error}")
+                break
+            time.sleep(1)
+
+        return bool(token)
     except Exception as e:
-        print(f"⚠️ 兜底方案出现异常: {e}")
+        print(f"⚠️ 处理 Cap 验证组件失败: {e}")
         return False
 
 
@@ -91,13 +93,13 @@ def run():
             page.locator('input[type="password"]').fill(PWD)
             print("已输入账号密码。")
 
-            # ================= 验证码处理逻辑（已修复） =================
-            print("等待验证码加载...")
-            time.sleep(5)
+            # ================= 验证码处理逻辑（已修复：识别为 Cap 组件） =================
+            print("等待验证码组件加载...")
+            time.sleep(3)
 
-            captcha_ok = solve_hcaptcha(page)
+            captcha_ok = solve_cap_widget(page)
             if not captcha_ok:
-                print("⚠️ 验证码未确认勾选成功，仍继续尝试点击登录（可能会失败）...")
+                print("⚠️ 验证码未确认通过，仍继续尝试点击登录（大概率会失败，便于留存排查截图）...")
             # ======================================================
 
             page.screenshot(path="2_点击登录前(确认是否打勾).png")
@@ -119,14 +121,13 @@ def run():
                     pass
                 if not captcha_ok:
                     raise Exception(
-                        "点击登录后页面未能跳转：验证码复选框未确认勾选成功，"
-                        "很可能是 hCaptcha 判定当前代理/机器行为为高风险，"
-                        "弹出了图片验证挑战（脚本无法自动解答），而非简单勾选。"
-                        "请查看截图 error_登录失败未跳转.png 确认。"
+                        "点击登录后页面未能跳转：Cap 验证码未能拿到有效 token，"
+                        "可能是组件加载较慢、点击位置未命中，或该代理节点的网络环境下 "
+                        "WASM/验证请求被拦截。请查看截图 error_登录失败未跳转.png 确认。"
                     )
                 else:
                     raise Exception(
-                        "点击登录后页面未能跳转，验证码已确认勾选成功，"
+                        "点击登录后页面未能跳转，Cap 验证码已确认拿到 token，"
                         "请检查账号密码是否正确，或网站是否有其他拦截逻辑。"
                     )
 
